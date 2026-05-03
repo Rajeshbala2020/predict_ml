@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
 import json
 import logging
+import os
 import re
 from contextlib import contextmanager
 import urllib.error
@@ -25,6 +27,7 @@ CONFIDENCE_THRESHOLD = 70.0
 # BSE scrip → Yahoo symbol when `${code}.BO` has no data on Yahoo (same equity on NSE/other).
 _BSE_SCRIP_YAHOO_ALIASES: dict[str, tuple[str, ...]] = {
     "532939": ("RPOWER.NS", "RPOWER.BO"),  # Reliance Power Ltd
+    "500875": ("ITC.NS", "ITC.BO"),  # ITC Ltd — Yahoo uses ITC.* not 500875.BO
 }
 
 
@@ -228,6 +231,143 @@ def _yf_download_series(ticker: str) -> pd.DataFrame | None:
     return None
 
 
+def _ohlcv_from_labeled_columns(df: pd.DataFrame) -> pd.DataFrame | None:
+    """Build standard OHLCV frame from CSV where columns are Date/timestamp + open/high/low/close/volume (any case)."""
+    if df is None or df.empty:
+        return None
+    lower = {str(c).strip().lower(): c for c in df.columns}
+    need = ("open", "high", "low", "close")
+    if not all(k in lower for k in need):
+        return None
+    date_col = lower.get("date") or lower.get("timestamp")
+    if not date_col:
+        return None
+    vol_col = lower.get("volume")
+    idx = pd.to_datetime(df[date_col], errors="coerce")
+    out = pd.DataFrame(
+        {
+            "Open": pd.to_numeric(df[lower["open"]], errors="coerce"),
+            "High": pd.to_numeric(df[lower["high"]], errors="coerce"),
+            "Low": pd.to_numeric(df[lower["low"]], errors="coerce"),
+            "Close": pd.to_numeric(df[lower["close"]], errors="coerce"),
+            "Volume": pd.to_numeric(df[vol_col], errors="coerce").fillna(0.0) if vol_col else 0.0,
+        },
+        index=idx,
+    )
+    out = out.dropna(subset=["Close"]).sort_index()
+    return out if _df_usable(out) else None
+
+
+def _fetch_stooq_ohlcv(ticker: str) -> pd.DataFrame | None:
+    """
+    Stooq daily CSV (optional). Stooq now requires a free API key from their captcha page.
+    Set ML_STOOQ_API_KEY in the environment; append &apikey=... to the download URL they give you.
+    """
+    api = os.getenv("ML_STOOQ_API_KEY", "").strip()
+    if not api:
+        return None
+    sym = ticker.strip().lower()
+    params = urllib.parse.urlencode({"s": sym, "i": "d", "apikey": api})
+    url = f"https://stooq.com/q/d/l/?{params}"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; stock-ml/1.0)"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            text = resp.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        logger.debug("Stooq HTTP failed %s: %s", ticker, exc)
+        return None
+    if not text.strip() or text.strip().startswith("Get your apikey"):
+        return None
+    try:
+        raw = pd.read_csv(io.StringIO(text))
+    except Exception as exc:
+        logger.debug("Stooq CSV parse failed %s: %s", ticker, exc)
+        return None
+    out = _ohlcv_from_labeled_columns(raw)
+    if out is not None:
+        logger.info("Loaded OHLCV via Stooq for %s", ticker)
+    return out
+
+
+def _alpha_vantage_symbol_variants(ticker: str) -> list[str]:
+    """Alpha Vantage uses .BSE / .NSE suffixes for many Indian listings."""
+    u = ticker.strip().upper()
+    out: list[str] = []
+
+    def add(x: str) -> None:
+        if x and x not in out:
+            out.append(x)
+
+    if u.endswith(".BO"):
+        add(u.replace(".BO", ".BSE"))
+    elif u.endswith(".NSE"):
+        add(u)
+    elif u.endswith(".NS"):
+        add(u.replace(".NS", ".NSE"))
+    elif re.fullmatch(r"\d{5,7}", u):
+        add(f"{u}.BSE")
+        add(f"{u}.NSE")
+    else:
+        add(f"{u}.NSE")
+        add(f"{u}.BSE")
+    return out
+
+
+def _fetch_alpha_vantage_ohlcv(ticker: str) -> pd.DataFrame | None:
+    """
+    Alpha Vantage TIME_SERIES_DAILY CSV (optional free tier key).
+    Set ML_ALPHA_VANTAGE_KEY — https://www.alphavantage.co/support/#api-key
+    """
+    key = os.getenv("ML_ALPHA_VANTAGE_KEY", "").strip()
+    if not key:
+        return None
+    for av_sym in _alpha_vantage_symbol_variants(ticker):
+        params = urllib.parse.urlencode(
+            {
+                "function": "TIME_SERIES_DAILY",
+                "symbol": av_sym,
+                "outputsize": "full",
+                "datatype": "csv",
+                "apikey": key,
+            }
+        )
+        url = f"https://www.alphavantage.co/query?{params}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; stock-ml/1.0)"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                text = resp.read().decode("utf-8", errors="replace")
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            logger.debug("Alpha Vantage HTTP failed %s: %s", av_sym, exc)
+            continue
+        if not text.strip() or text.lstrip().startswith("{") or "Thank you for using Alpha Vantage" in text:
+            continue
+        if "Invalid API call" in text or "Error Message" in text:
+            continue
+        try:
+            raw = pd.read_csv(io.StringIO(text))
+        except Exception:
+            continue
+        out = _ohlcv_from_labeled_columns(raw)
+        if out is not None:
+            logger.info("Loaded OHLCV via Alpha Vantage symbol=%s for ticker=%s", av_sym, ticker)
+            return out
+    return None
+
+
+def _load_ohlcv_any_source(ticker: str) -> pd.DataFrame | None:
+    """Yahoo (chart + yfinance), then optional Stooq / Alpha Vantage if API keys are set."""
+    d = _yf_download_series(ticker)
+    if d is not None and _df_usable(d):
+        return d
+    d = _fetch_stooq_ohlcv(ticker)
+    if d is not None:
+        return d
+    d = _fetch_alpha_vantage_ohlcv(ticker)
+    if d is not None:
+        return d
+    return None
+
+
 def _yahoo_search_first_indian_ticker(query: str) -> str | None:
     """Match Next.js resolve fallback: Yahoo search for first .NS / .BO hit."""
     q = urllib.parse.quote(query.strip())
@@ -278,18 +418,25 @@ class StockPredictor:
 
         data: pd.DataFrame | None = None
         for ticker in candidates:
-            raw = _yf_download_series(ticker)
+            raw = _load_ohlcv_any_source(ticker)
             if raw is not None and not raw.empty:
                 data = raw
-                logger.info("Using Yahoo ticker %s for input=%s (stored as %s)", ticker, symbol, symbol_out)
+                logger.info("Using price ticker %s for input=%s (stored as %s)", ticker, symbol, symbol_out)
                 break
 
         if data is None or data.empty:
             tried = ", ".join(candidates[:10]) + ("…" if len(candidates) > 10 else "")
+            extras = []
+            if not os.getenv("ML_STOOQ_API_KEY", "").strip():
+                extras.append("optional ML_STOOQ_API_KEY (Stooq CSV after captcha)")
+            if not os.getenv("ML_ALPHA_VANTAGE_KEY", "").strip():
+                extras.append("optional ML_ALPHA_VANTAGE_KEY (Alpha Vantage)")
+            extra_txt = f" Or set {'; '.join(extras)} for non-Yahoo fallbacks." if extras else ""
             raise RuntimeError(
-                f"No price history on Yahoo for input={symbol!r} (tried: {tried}). "
-                "Yahoo reports many BSE numeric codes as delisted or moved—open the symbol on finance.yahoo.com, "
+                f"No price history for input={symbol!r} (Yahoo + configured fallbacks; tried: {tried}). "
+                "Many BSE numeric codes have no Yahoo series—open finance.yahoo.com for the equity, "
                 "then set `indian_stocks.yf_symbol` to the exact ticker shown there, or remove the symbol from the watchlist."
+                f"{extra_txt}"
             )
 
         features_df = build_features(data)
