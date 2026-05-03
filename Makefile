@@ -25,6 +25,6 @@ run:
 	$(ACTIVATE) && DATABASE_URL="$(DB_URL)" uvicorn main:app --reload --port 8000
 
 test-predict:
-	$(ACTIVATE) && python -c "from service import StockPredictor; print(StockPredictor().predict('AAPL'))"
+	$(ACTIVATE) && python -c "from service import StockPredictor; print(StockPredictor().predict('GOLDBEES'))"
 
 quickstart: setup up train run

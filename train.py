@@ -12,13 +12,22 @@ from features import FEATURE_COLUMNS, build_features
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SYMBOL = "AAPL"
+DEFAULT_SYMBOL = "GOLDBEES"
 MODEL_PATH = Path("model.pkl")
 
 
+def _yahoo_download_ticker(symbol: str) -> str:
+    """yfinance needs NSE suffix for many Indian symbols (e.g. GOLDBEES → GOLDBEES.NS)."""
+    s = symbol.strip().upper()
+    if "." in s:
+        return s
+    return f"{s}.NS"
+
+
 def fetch_training_data(symbol: str = DEFAULT_SYMBOL, period: str = "2y"):
-    logger.info("Downloading historical data for %s (%s)", symbol, period)
-    data = yf.download(symbol, period=period, interval="1d", auto_adjust=True, progress=False)
+    yahoo_ticker = _yahoo_download_ticker(symbol)
+    logger.info("Downloading historical data for %s as %s (%s)", symbol, yahoo_ticker, period)
+    data = yf.download(yahoo_ticker, period=period, interval="1d", auto_adjust=True, progress=False)
     if data.empty:
         raise RuntimeError(f"No historical data fetched for symbol={symbol}.")
     return data

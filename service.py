@@ -251,14 +251,14 @@ class StockPredictor:
         self.model_path = model_path
         self.model = None
         self.feature_columns = FEATURE_COLUMNS
-        self.train_symbol = "AAPL"
+        self.train_symbol = "GOLDBEES"
 
     def ensure_model(self) -> None:
         if self.model_path.exists():
             payload = joblib.load(self.model_path)
             self.model = payload["model"]
             self.feature_columns = payload.get("feature_columns", FEATURE_COLUMNS)
-            self.train_symbol = payload.get("symbol", "AAPL")
+            self.train_symbol = payload.get("symbol", "GOLDBEES")
             return
 
         logger.info("Model file not found. Triggering training.")
