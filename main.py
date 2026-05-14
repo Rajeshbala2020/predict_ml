@@ -19,6 +19,7 @@ from db import (
     mark_notification_read,
 )
 from scheduler import create_scheduler, start_scheduler, stop_scheduler
+from research_chat_service import ResearchChatRequest, run_research_chat
 from service import StockPredictor, predict_and_store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -82,7 +83,7 @@ def root():
         "status": "ok",
         "service": "stock-ml",
         "db_enabled": DB_ENABLED,
-        "message": "Use /predict, /predict-and-store, /watchlist, /notifications, /predictions",
+        "message": "Use /predict, /predict-and-store, /research-chat, /watchlist, /notifications, /predictions",
     }
 
 
@@ -94,6 +95,21 @@ def predict(payload: PredictRequest):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/research-chat")
+def research_chat(payload: ResearchChatRequest):
+    """
+    Local HF instruct model: draft + refined answer with self-analysis.
+    Requires: pip install -r requirements-research-chat.txt
+    """
+    try:
+        return run_research_chat(payload)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("research-chat failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/predict-and-store")

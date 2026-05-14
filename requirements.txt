@@ -9,3 +9,4 @@ SQLAlchemy
 psycopg2-binary
 apscheduler
 pydantic
+# Optional research chat (local HF model): pip install -r requirements-research-chat.txt

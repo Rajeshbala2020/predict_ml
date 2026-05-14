@@ -1,0 +1,5 @@
+# Optional: local Hugging Face research chat inside ml-service (POST /research-chat).
+# Install alongside base deps: pip install -r requirements.txt -r requirements-research-chat.txt
+torch>=2.2.0
+transformers>=4.44.0
+safetensors>=0.4.0
